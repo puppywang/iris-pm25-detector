@@ -9,12 +9,13 @@
 *********************************************************************/
 
 #include "U8glib.h"
+#include <SoftwareSerial.h>
 
 #define joystickPin 0
 #define dhtPin 2 //DHT PIN2
 #define RES 6    //LED reset pin PIN6
 #define DC 7     //LED DC pin PIN3
-#define PM25SetPin 4 // PM2.5 Sensor RX PIN4
+#define sensorSetPin 4 // PM2.5 Sensor RX PIN4
 
 #define RedLedPin 9
 #define GreenLedPin 10
@@ -39,6 +40,7 @@ uint8_t draw_state = 0;
 boolean show_color = true;
 
 U8GLIB_SSD1306_128X64 u8g(U8G_I2C_OPT_NONE);
+SoftwareSerial sensorSerial(8, 11); // RX, TX
 
 /*********************************************************************
   DHT Initialization
@@ -238,29 +240,50 @@ int count_100_um = 0;
 
 
 void u8g_drawxyz(int value) {
-  int x = value / 100; //变量xyz被拆分并分为3个值分别显示
-  int y = value % 100;
-  int z = y % 10;
-  y = y / 10;
+  // 变量xyz被拆分并分为3个值分别显示
+  int v = value / 10000;
+  value -= v * 10000;
+  int w = value / 1000;
+  value -= w * 1000;
+  int x = value / 100;
+  value -= x * 100; 
+  int y = value / 10;
+  value -= y * 10;
+  int z = value;
+
+  char s_v[2] = " ";
+  char s_w[2] = " ";
   char s_x[2] = " ";
   char s_y[2] = " ";
   char s_z[2] = " ";
+
+  s_v[0] = v + 48;
+  s_w[0] = w + 48;
   s_x[0] = x + 48;
   s_y[0] = y + 48;
   s_z[0] = z + 48;
 
   u8g.setScale2x2();//大字体
-  if (x > 0) { //消除第一位为0时的显示问题
-    u8g.drawStr(20, 12, s_x);
-    u8g.drawStr(30, 12, s_y);
-    u8g.drawStr(40, 12, s_z);
+  boolean first_digit = true;
+  if (v > 0) {
+    u8g.drawStr(10, 12, s_v);
+    first_digit = false;
   }
-  if (x == 0) {
-    if (y == 0) {
-      u8g.drawStr(40, 12, s_z);
-    }
-    u8g.drawStr(30, 12, s_y);
-    u8g.drawStr(40, 12, s_z);
+  if (!first_digit || w > 0) {
+    u8g.drawStr(20, 12, s_w);
+    first_digit = false;
+  }
+  if (!first_digit || x > 0) {
+    u8g.drawStr(30, 12, s_x);
+    first_digit = false;
+  }
+  if (!first_digit || y > 0) {
+    u8g.drawStr(40, 12, s_y);
+    first_digit = false;
+  }
+  if (!first_digit || z > 0) {
+    u8g.drawStr(50, 12, s_z);
+    first_digit = false;
   }
   u8g.undoScale();
 }
@@ -272,49 +295,47 @@ void ProcessSerialData()
   uint8_t i = 0;
   uint8_t readout_bit[32] = {0};
   int checksum = 0;
-  while (Serial.available() > 0)
+  
+  while (sensorSerial.available() > 0)
   {
     Serial.println("Begin Read PM2.5 Sensor...");
     // Base on the protocol of Plantower PMS1003
-    one_readout = Serial.read();
-    delay(2); // wait until packet is received
+    one_readout = sensorSerial.read();
     if (one_readout == 0x42) // head1 ok
     {
-      readout_bit[0] =  one_readout;
-      one_readout = Serial.read();
+      readout_bit[0] = one_readout;
+      one_readout = sensorSerial.read();
       if (one_readout == 0x4d) // head2 ok
       {
-        readout_bit[1] =  one_readout;
+        readout_bit[1] = one_readout;
         checksum = 0x42 + 0x4d;
         for (int i = 2; i < 30; i++) //data recv and crc calc
         {
-          readout_bit[i] = Serial.read();
-          delay(2);
+          readout_bit[i] = sensorSerial.read();
           checksum += readout_bit[i];
         }
-        readout_bit[30] = Serial.read();
-        delay(1);
-        readout_bit[31] = Serial.read();
+        readout_bit[30] = sensorSerial.read();
+        readout_bit[31] = sensorSerial.read();
         Serial.println();
         Serial.print(checksum);
         Serial.print("  ");
-        Serial.println(readout_bit[30] * 0xff + readout_bit[31]);
-        if (true /*checksum == readout_bit[30] * 0xff + readout_bit[31]*/) //crc ok
+        Serial.println(readout_bit[30] * 0x100 + readout_bit[31]);
+        if (checksum == readout_bit[30] * 0x100 + readout_bit[31]) //crc ok
         {
           Serial.println("Done PM2.5 Readout~");
           Serial.flush();
-          pm1_value = readout_bit[10] * 0xff + readout_bit[11];
-          pm25_value = readout_bit[12] * 0xff + readout_bit[13];
-          pm10_value = readout_bit[14] * 0xff + readout_bit[15];
-          pm1_cf_value = readout_bit[4] * 0xff + readout_bit[5];
-          pm25_cf_value = readout_bit[6] * 0xff + readout_bit[7];
-          pm10_cf_value = readout_bit[8] * 0xff + readout_bit[9];
-          count_03_um = readout_bit[16] * 0xff + readout_bit[17];
-          count_05_um = readout_bit[18] * 0xff + readout_bit[19];
-          count_10_um = readout_bit[20] * 0xff + readout_bit[21];
+          pm1_value = readout_bit[10] * 256 + readout_bit[11];
+          pm25_value = readout_bit[12] * 256 + readout_bit[13];
+          pm10_value = readout_bit[14] * 256 + readout_bit[15];
+          pm1_cf_value = readout_bit[4] * 256 + readout_bit[5];
+          pm25_cf_value = readout_bit[6] * 256 + readout_bit[7];
+          pm10_cf_value = readout_bit[8] * 256 + readout_bit[9];
+          count_03_um = readout_bit[16] * 256 + readout_bit[17];
+          count_05_um = readout_bit[18] * 256 + readout_bit[19];
+          count_10_um = readout_bit[20] * 256 + readout_bit[21];
           count_25_um = readout_bit[22] * 0xff + readout_bit[23];
-          count_50_um = readout_bit[24] * 0xff + readout_bit[25];
-          count_100_um = readout_bit[26] * 0xff + readout_bit[27];
+          count_50_um = readout_bit[24] * 256 + readout_bit[25];
+          count_100_um = readout_bit[26] * 256 + readout_bit[27];
           return;
         }
       }
@@ -324,12 +345,16 @@ void ProcessSerialData()
 
 void setup() {
   ledBegin();
+  dhtBegin();
   u8g.setColorIndex(1);             //displayMode : u8g_MODE_BW
+
   // Setup PM2.5 Sensor
   Serial.begin(9600);
+  sensorSerial.begin(9600);
+
   // SET PIN = 1, WORKING
-  pinMode(PM25SetPin, OUTPUT);
-  digitalWrite(PM25SetPin, HIGH);
+  pinMode(sensorSetPin, OUTPUT);
+  digitalWrite(sensorSetPin, HIGH);
 
   analogWrite(RedLedPin, 255);
   analogWrite(GreenLedPin, 255);
@@ -365,9 +390,9 @@ void loop() {
       analogWrite(GreenLedPin, 250);
       analogWrite(BlueLedPin, 255);
     } else if (pm25_value < 160) {
-      analogWrite(RedLedPin, 255);
+      analogWrite(RedLedPin, 250);
       analogWrite(GreenLedPin, 250);
-      analogWrite(BlueLedPin, 250);
+      analogWrite(BlueLedPin, 255);
     } else {
       analogWrite(RedLedPin, 250);
       analogWrite(GreenLedPin, 255);
