@@ -6,10 +6,23 @@
   Description
    PM2.5 sensor code for Iris
 
-*********************************************************************/
+ ----------------------------------------------------------------------------- Nicola Coppola
+ * Pin layout should be as follows:
+ * Signal     Pin              Pin               Pin
+ *            Arduino Uno      Arduino Mega      MFRC522 board
+ * ------------------------------------------------------------
+ * Reset      9                5                 RST
+ * SPI SS     10               53                SDA
+ * SPI MOSI   11               51                MOSI
+ * SPI MISO   12               50                MISO
+ * SPI SCK    13               52                SCK
+- *
+ *********************************************************************/
 
-#include "U8glib.h"
+#include <U8glib.h>
 #include <SoftwareSerial.h>
+#include <SPI.h>
+#include <MFRC522.h>
 
 #define joystickPin 0
 #define dhtPin 2 //DHT PIN2
@@ -19,7 +32,7 @@
 
 #define RedLedPin 9
 #define GreenLedPin 10
-#define BlueLedPin  3
+//#define BlueLedPin  3
 
 // how many timing transitions we need to keep track of. 2 * number bits + extra
 #define MAXTIMINGS 85
@@ -32,6 +45,9 @@
 #define dhtType DHT11
 #define dhtCount 6
 
+#define SS_PIN 5
+#define RST_PIN 3
+
 unsigned long _lastreadtime;
 boolean firstreading;
 uint8_t data[6];
@@ -40,7 +56,8 @@ uint8_t draw_state = 0;
 boolean show_color = true;
 
 U8GLIB_SSD1306_128X64 u8g(U8G_I2C_OPT_NONE);
-SoftwareSerial sensorSerial(8, 11); // RX, TX
+SoftwareSerial sensorSerial(8, 14); // RX, TX
+MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance.
 
 /*********************************************************************
   DHT Initialization
@@ -63,6 +80,61 @@ void ledBegin(void) {
   digitalWrite(RES, HIGH);   delay(100);
   digitalWrite(RES, LOW);    delay(100);
   digitalWrite(RES, HIGH);   delay(100);
+}
+
+/**
+* Helper to print MFRC522 module info
+*/
+void ShowReaderVersion() {
+  // Get the MFRC522 firmware version
+  byte v = mfrc522.PCD_ReadRegister(mfrc522.VersionReg);
+  Serial.print(F("Firmware Version: 0x"));
+  Serial.print(v, HEX);
+  if (v == 0x88)
+    Serial.print(F(" = (clone)"));
+  else if (v == 0x90)
+    Serial.print(F(" = v0.0"));
+  else if (v == 0x91)
+    Serial.print(F(" = v1.0"));
+  else if (v == 0x92)
+    Serial.print(F(" = v2.0"));
+  else
+    Serial.print(F(" = (unknown)"));
+  Serial.println();
+  // When 0x00 or 0xFF is returned, communication probably failed
+  if ((v == 0x00) || (v == 0xFF))
+    Serial.println(F("WARNING: Communication failure, is the MFRC522 properly connected?"));
+}
+
+void rfidBegin(void) {
+  SPI.begin();      // Init SPI bus
+  mfrc522.PCD_Init(); // Init MFRC522 card
+  
+  Serial.println(F("*****************************"));
+  Serial.println(F("MFRC522 Digital self test"));
+  Serial.println(F("*****************************"));
+  ShowReaderVersion();  // Show version of PCD - MFRC522 Card Reader
+  Serial.println(F("Performing test..."));
+  bool result = mfrc522.PCD_PerformSelfTest();
+  Serial.println(F("-----------------------------"));
+  Serial.print(F("Result: "));
+  if (result)
+    Serial.println(F("OK"));
+  else
+    Serial.println(F("DEFECT or UNKNOWN"));
+  Serial.println();
+
+  mfrc522.PCD_Init(); // Init MFRC522 card
+  Serial.println("Scan PICC to see UID and type...");
+}
+
+void pm25SensorBegin(void) {
+  // Setup PM2.5 Sensor
+  sensorSerial.begin(9600);
+
+  // SET PIN = 1, WORKING
+  pinMode(sensorSetPin, OUTPUT);
+  digitalWrite(sensorSetPin, HIGH);
 }
 
 /*********************************************************************
@@ -240,7 +312,7 @@ int count_100_um = 0;
 
 
 void u8g_drawxyz(int value) {
-  // 变量xyz被拆分并分为3个值分别显示
+  // 鍙橀噺xyz琚媶鍒嗗苟鍒嗕负3涓�煎垎鍒樉绀�
   int v = value / 10000;
   value -= v * 10000;
   int w = value / 1000;
@@ -289,7 +361,7 @@ void u8g_drawxyz(int value) {
 }
 
 //读取PMS1003的数据。并根据通信协议转化成有效的值。
-void ProcessSerialData()
+void processSensorData()
 {
   uint8_t one_readout = 0;
   uint8_t i = 0;
@@ -298,7 +370,9 @@ void ProcessSerialData()
   
   while (sensorSerial.available() > 0)
   {
+/*
     Serial.println("Begin Read PM2.5 Sensor...");
+*/
     // Base on the protocol of Plantower PMS1003
     one_readout = sensorSerial.read();
     if (one_readout == 0x42) // head1 ok
@@ -316,14 +390,18 @@ void ProcessSerialData()
         }
         readout_bit[30] = sensorSerial.read();
         readout_bit[31] = sensorSerial.read();
+/*
         Serial.println();
         Serial.print(checksum);
         Serial.print("  ");
         Serial.println(readout_bit[30] * 0x100 + readout_bit[31]);
+*/
         if (checksum == readout_bit[30] * 0x100 + readout_bit[31]) //crc ok
         {
+/*
           Serial.println("Done PM2.5 Readout~");
           Serial.flush();
+*/
           pm1_value = readout_bit[10] * 256 + readout_bit[11];
           pm25_value = readout_bit[12] * 256 + readout_bit[13];
           pm10_value = readout_bit[14] * 256 + readout_bit[15];
@@ -343,31 +421,92 @@ void ProcessSerialData()
   }
 }
 
+void hexDump(byte* buf, int len) {
+  for (int i = 0; i < len; i++) {
+    if (buf[i] < 0x10) {
+      Serial.print(0);
+    }
+    Serial.print(buf[i], HEX);
+    Serial.print(' ');
+  }
+  Serial.print(F("(Cnt = "));
+  Serial.print(len);
+  Serial.println(")");
+}
+
 void setup() {
+  Serial.begin(115200);
+  
   ledBegin();
   dhtBegin();
+  rfidBegin();
+  pm25SensorBegin();
   u8g.setColorIndex(1);             //displayMode : u8g_MODE_BW
+/*
+  Serial.print("TxModeReg:");
+  Serial.println(mfrc522.PCD_ReadRegister(MFRC522::TxModeReg));
+  Serial.print("RxModeReg:");
+  Serial.println(mfrc522.PCD_ReadRegister(MFRC522::RxModeReg));
+*/
+  Serial.print("PCD_GetAntennaGain:");
+  Serial.println(mfrc522.PCD_GetAntennaGain());
+  mfrc522.PCD_SetAntennaGain(112);
+  Serial.print("New PCD_GetAntennaGain:");
+  Serial.println(mfrc522.PCD_GetAntennaGain());
 
-  // Setup PM2.5 Sensor
-  Serial.begin(9600);
-  sensorSerial.begin(9600);
-
-  // SET PIN = 1, WORKING
-  pinMode(sensorSetPin, OUTPUT);
-  digitalWrite(sensorSetPin, HIGH);
-
+  // RGBLedBegin
   analogWrite(RedLedPin, 255);
   analogWrite(GreenLedPin, 255);
-  analogWrite(BlueLedPin, 255);
+//  analogWrite(BlueLedPin, 255);
 }
 
 void loop() {
   u8g.firstPage();
-  ProcessSerialData();
+  processSensorData();
   do {
     draw();
   }
   while (u8g.nextPage());
+/*
+  byte bufferATQA[2] = {0};
+  byte bufferATQASize = sizeof(bufferATQA);
+  byte result = mfrc522.PICC_RequestA(bufferATQA, &bufferATQASize);
+  Serial.print("PICC_RequestA:");
+  Serial.println(result);
+  hexDump(bufferATQA, bufferATQASize);
+  if (result == MFRC522::STATUS_OK) {
+    byte bufferSelectAll[10] = {0};
+    byte bufferSelectAllSize = sizeof(bufferSelectAll);
+    byte selectCmd[] = { 0x93, 0x20 };
+    result = mfrc522.PCD_TransceiveData(selectCmd, sizeof(selectCmd), bufferSelectAll, &bufferSelectAllSize);
+    if (bufferSelectAllSize == 5 && (bufferSelectAll[0] ^ bufferSelectAll[1] ^ bufferSelectAll[2] ^ bufferSelectAll[3] == bufferSelectAll[4])) {
+      Serial.print("PICC_Select:");
+      Serial.println(result);
+      hexDump(bufferSelectAll, bufferSelectAllSize);
+      if (result == MFRC522::STATUS_OK) {
+        byte bufferSelectCard[10] = {0};
+        byte bufferSelectCardSize = sizeof(bufferSelectCard);
+        byte selectCardCmd[9] = { 0x93, 0x70 };
+        memcpy(selectCardCmd + 2, bufferSelectAll, 5);
+        mfrc522.PCD_CalculateCRC(selectCardCmd, 7, selectCardCmd + 7);
+        Serial.println("");
+        result = mfrc522.PCD_TransceiveData(selectCardCmd, sizeof(selectCardCmd), bufferSelectCard, &bufferSelectCardSize);
+        Serial.print("PICC_SelectCard:");
+        Serial.println(result);
+        hexDump(bufferSelectCard, bufferSelectCardSize);
+        if (result == MFRC522::STATUS_OK) {
+          mfrc522.PICC_HaltA();
+        }
+      }
+    }
+  }
+*/
+  if (mfrc522.PICC_IsNewCardPresent()) {
+    if (mfrc522.PICC_ReadCardSerial()) {
+      // Dump debug info about the card. PICC_HaltA() is automatically called.
+      mfrc522.PICC_DumpToSerial(&(mfrc522.uid));
+    }
+  }
 
   // rebuild the picture after some delay
   delay(150);
@@ -388,20 +527,20 @@ void loop() {
     if (pm25_value < 80) {
       analogWrite(RedLedPin, 255);
       analogWrite(GreenLedPin, 250);
-      analogWrite(BlueLedPin, 255);
+//      analogWrite(BlueLedPin, 255);
     } else if (pm25_value < 160) {
       analogWrite(RedLedPin, 250);
       analogWrite(GreenLedPin, 250);
-      analogWrite(BlueLedPin, 255);
+//      analogWrite(BlueLedPin, 255);
     } else {
       analogWrite(RedLedPin, 250);
       analogWrite(GreenLedPin, 255);
-      analogWrite(BlueLedPin, 255);
+//      analogWrite(BlueLedPin, 255);
     }
   } else {
     analogWrite(RedLedPin, 255);
     analogWrite(GreenLedPin, 255);
-    analogWrite(BlueLedPin, 255);
+//    analogWrite(BlueLedPin, 255);
   }
 }
 
@@ -494,4 +633,5 @@ void draw (void) {
       }
   }
 }
+
 
